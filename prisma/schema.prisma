@@ -1,0 +1,287 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+
+}
+
+
+
+enum RunStatus {
+  queued
+  planning
+  awaiting_plan_approval
+  implementing
+  awaiting_pr_approval
+  creating_pr
+  completed
+  failed
+  blocked
+  cancelled
+  expired
+}
+
+enum ApprovalType {
+  plan
+  pr
+}
+
+enum ApprovalDecision {
+  approved
+  rejected
+}
+
+enum TestKind {
+  baseline
+  unit
+  integration
+  lint
+  typecheck
+}
+
+enum TestStatus {
+  passed
+  failed
+  error
+  skipped
+}
+
+enum Severity {
+  critical
+  high
+  medium
+  low
+  info
+}
+
+// ---------------------------------------------------------------------------
+// Identity and GitHub connection
+// ---------------------------------------------------------------------------
+
+model User {
+  id        String   @id @default(uuid())
+  githubId  BigInt   @unique
+  login     String
+  email     String?
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  installations Installation[]
+  runs          Run[]
+
+  @@map("users")
+}
+
+model Installation {
+  id             String   @id @default(uuid())
+  userId         String
+  installationId BigInt   @unique // GitHub installation id
+  accountLogin   String
+  createdAt      DateTime @default(now()) @db.Timestamptz(3)
+
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  repositories Repository[]
+
+  @@index([userId])
+  @@map("github_installations")
+}
+
+model Repository {
+  id             String   @id @default(uuid())
+  installationId String
+  githubRepoId   BigInt?
+  owner          String
+  name           String
+  fullName       String // "owner/name"
+  defaultBranch  String   @default("main")
+  createdAt      DateTime @default(now()) @db.Timestamptz(3)
+
+  installation Installation @relation(fields: [installationId], references: [id], onDelete: Cascade)
+  issues       Issue[]
+
+  @@unique([installationId, owner, name])
+  @@map("repositories")
+}
+
+model Issue {
+  id            String   @id @default(uuid())
+  repositoryId  String
+  githubIssueId BigInt
+  number        Int // issue number shown in GitHub, for example 142
+  title         String
+  body          String?  @db.Text
+  state         String   @default("open")
+  createdAt     DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt     DateTime @updatedAt @db.Timestamptz(3)
+
+  repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  runs       Run[]
+
+  @@unique([repositoryId, githubIssueId])
+  @@index([repositoryId, number])
+  @@map("issues")
+}
+
+// ---------------------------------------------------------------------------
+// Runs and everything that belongs to one run
+// ---------------------------------------------------------------------------
+
+model Run {
+  id         String    @id @default(uuid())
+  issueId    String
+  userId     String // owner of the run. Check it on every request.
+  status     RunStatus @default(queued)
+  stage      String    @default("initializing")
+  retryCount Int       @default(0)
+  baseCommit String? // commit the agent started from
+  branchName String? // set by normal code, not by the LLM
+  costUsd    Decimal   @default(0) @db.Decimal(10, 4)
+  tokensUsed Int       @default(0)
+  errorCode  String?
+  createdAt  DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt  DateTime  @updatedAt @db.Timestamptz(3)
+  finishedAt DateTime? @db.Timestamptz(3)
+
+  issue         Issue           @relation(fields: [issueId], references: [id], onDelete: Cascade)
+  user          User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  events        RunEvent[]
+  plans         Plan[]
+  patches       Patch[]
+  testResults   TestResult[]
+  findings      ReviewFinding[]
+  approvals     Approval[]
+  pullRequest   PullRequest?
+
+  @@index([status])
+  @@index([userId, createdAt])
+  @@map("agent_runs")
+}
+
+// Timeline of what happened. Insert only. Do not update rows.
+model RunEvent {
+  id        String   @id @default(uuid())
+  runId     String
+  agent     String // for example "issue_analyst", "developer", "system"
+  type      String // for example "started", "tool_call", "completed", "error"
+  payload   Json     @default("{}")
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  run Run @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId, createdAt])
+  @@map("agent_events")
+}
+
+model Plan {
+  id         String    @id @default(uuid())
+  runId      String
+  version    Int       @default(1)
+  planJson   Json
+  approvedAt DateTime? @db.Timestamptz(3)
+  createdAt  DateTime  @default(now()) @db.Timestamptz(3)
+
+  run Run @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@unique([runId, version])
+  @@map("implementation_plans")
+}
+
+// The saved diff. The source of truth is baseCommit + diff. Sandboxes are disposable.
+model Patch {
+  id         String   @id @default(uuid())
+  runId      String
+  version    Int      @default(1)
+  baseCommit String
+  diff       String   @db.Text
+  stats      Json     @default("{}") // files changed, lines added, lines removed
+  createdAt  DateTime @default(now()) @db.Timestamptz(3)
+
+  run Run @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@unique([runId, version])
+  @@map("patches")
+}
+
+model TestResult {
+  id        String     @id @default(uuid())
+  runId     String
+  kind      TestKind
+  status    TestStatus
+  passed    Int        @default(0)
+  failed    Int        @default(0)
+  output    String     @db.Text // truncate and redact before you save
+  createdAt DateTime   @default(now()) @db.Timestamptz(3)
+
+  run Run @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId, kind])
+  @@map("test_results")
+}
+
+model ReviewFinding {
+  id         String   @id @default(uuid())
+  runId      String
+  severity   Severity
+  filePath   String?
+  line       Int?
+  finding    String   @db.Text
+  evidence   String?  @db.Text
+  suggestion String?  @db.Text
+  createdAt  DateTime @default(now()) @db.Timestamptz(3)
+
+  run Run @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId, severity])
+  @@map("review_findings")
+}
+
+// Append only. Never update or delete rows in application code.
+// (Later, add a database trigger to enforce this.)
+model Approval {
+  id         String           @id @default(uuid())
+  runId      String
+  type       ApprovalType
+  decision   ApprovalDecision
+  approvedBy String // User.id
+  comment    String?
+  createdAt  DateTime         @default(now()) @db.Timestamptz(3)
+
+  run Run @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId, type])
+  @@map("approvals")
+}
+
+model PullRequest {
+  id             String   @id @default(uuid())
+  runId          String   @unique // one PR for each run
+  githubPrNumber Int
+  url            String
+  isDraft        Boolean  @default(false)
+  idempotencyKey String   @unique
+  createdAt      DateTime @default(now()) @db.Timestamptz(3)
+
+  run Run @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@map("pull_requests")
+}
+
+// ---------------------------------------------------------------------------
+// Webhooks
+// ---------------------------------------------------------------------------
+
+model WebhookDelivery {
+  deliveryId String   @id // value of the X-GitHub-Delivery header
+  event      String
+  receivedAt DateTime @default(now()) @db.Timestamptz(3)
+
+  @@map("webhook_deliveries")
+}
