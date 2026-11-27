@@ -1,0 +1,32 @@
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    env:
+      DIRECT_URL: postgresql://user:pass@localhost:5432/db
+      DATABASE_URL: postgresql://user:pass@localhost:5432/db
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+
+  agent:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/agent
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v10.0.1
+      - run: uv sync
+      - run: uv run ruff check
+      - run: uv run pytest
