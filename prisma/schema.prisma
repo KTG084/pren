@@ -11,10 +11,7 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-
 }
-
-
 
 enum RunStatus {
   queued
@@ -68,16 +65,42 @@ enum Severity {
 // ---------------------------------------------------------------------------
 
 model User {
-  id        String   @id @default(uuid())
-  githubId  BigInt   @unique
-  login     String
-  email     String?
-  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  id            String    @id @default(uuid())
+  name          String?
+  email         String?   @unique
+  emailVerified DateTime?
+  image         String?
+  login         String?
+  createdAt     DateTime  @default(now()) @db.Timestamptz(3)
 
+  accounts      Account[]
   installations Installation[]
   runs          Run[]
+  approvals     Approval[]
 
   @@map("users")
+}
+
+model Account {
+  id                       String  @id @default(cuid())
+  userId                   String
+  type                     String
+  provider                 String
+  providerAccountId        String
+  refresh_token            String? @db.Text
+  access_token             String? @db.Text
+  expires_at               Int?
+  refresh_token_expires_in Int?
+  token_type               String?
+  scope                    String?
+  id_token                 String? @db.Text
+  session_state            String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+  @@map("accounts")
 }
 
 model Installation {
@@ -150,15 +173,15 @@ model Run {
   updatedAt  DateTime  @updatedAt @db.Timestamptz(3)
   finishedAt DateTime? @db.Timestamptz(3)
 
-  issue         Issue           @relation(fields: [issueId], references: [id], onDelete: Cascade)
-  user          User            @relation(fields: [userId], references: [id], onDelete: Cascade)
-  events        RunEvent[]
-  plans         Plan[]
-  patches       Patch[]
-  testResults   TestResult[]
-  findings      ReviewFinding[]
-  approvals     Approval[]
-  pullRequest   PullRequest?
+  issue       Issue           @relation(fields: [issueId], references: [id], onDelete: Cascade)
+  user        User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  events      RunEvent[]
+  plans       Plan[]
+  patches     Patch[]
+  testResults TestResult[]
+  findings    ReviewFinding[]
+  approvals   Approval[]
+  pullRequest PullRequest?
 
   @@index([status])
   @@index([userId, createdAt])
@@ -246,17 +269,20 @@ model ReviewFinding {
 // Append only. Never update or delete rows in application code.
 // (Later, add a database trigger to enforce this.)
 model Approval {
-  id         String           @id @default(uuid())
-  runId      String
-  type       ApprovalType
-  decision   ApprovalDecision
-  approvedBy String // User.id
-  comment    String?
-  createdAt  DateTime         @default(now()) @db.Timestamptz(3)
+  id             String           @id @default(uuid())
+  runId          String
+  type           ApprovalType
+  subjectVersion Int // plan or patch version that the human approved
+  decision       ApprovalDecision
+  approvedBy     String
+  comment        String?
+  createdAt      DateTime         @default(now()) @db.Timestamptz(3)
 
-  run Run @relation(fields: [runId], references: [id], onDelete: Cascade)
+  run      Run  @relation(fields: [runId], references: [id], onDelete: Cascade)
+  approver User @relation(fields: [approvedBy], references: [id], onDelete: Cascade)
 
   @@index([runId, type])
+  @@index([approvedBy])
   @@map("approvals")
 }
 
